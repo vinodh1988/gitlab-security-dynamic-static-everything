@@ -1,0 +1,22 @@
+# Scan-only fixture. Do not apply to a cluster.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: insecure-security-lab
+spec:
+  hostNetwork: true
+  hostPID: true
+  containers:
+    - name: lab
+      image: python:3.11.4-bullseye
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+      volumeMounts:
+        - name: host
+          mountPath: /host
+  volumes:
+    - name: host
+      hostPath:
+        path: /

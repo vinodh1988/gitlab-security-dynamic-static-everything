@@ -1,0 +1,30 @@
+openapi: 3.0.3
+info:
+  title: Isolated GitLab Security Lab API
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+paths:
+  /api/users:
+    get:
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+          example: alice
+      responses:
+        '200':
+          description: Seeded users
+  /api/import:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema:
+              type: string
+            example: 'name: lab'
+      responses:
+        '200':
+          description: Imported YAML

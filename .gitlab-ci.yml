@@ -1,0 +1,140 @@
+# GitLab 19.0+ / Ultimate security lab. Reports are declared by official templates.
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/SAST-IaC.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+  - template: Jobs/Dependency-Scanning.v2.gitlab-ci.yml
+    inputs:
+      allow_failure: false
+      disabled_resolution_jobs: "python"
+  - template: Jobs/Container-Scanning.gitlab-ci.yml
+  - template: Security/DAST.gitlab-ci.yml
+  - template: Security/API-Security.gitlab-ci.yml
+  - template: Security/API-Fuzzing.gitlab-ci.yml
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+variables:
+  AST_ENABLE_MR_PIPELINES: "true"
+  # Scan all lab history, including synthetic credentials in the first commit.
+  GIT_DEPTH: "0"
+  SECRET_DETECTION_HISTORIC_SCAN: "true"
+  CS_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  CS_DISABLE_LANGUAGE_VULNERABILITY_SCAN: "false"
+  DS_ENABLE_VULNERABILITY_SCAN: "true"
+  # Give each job its own network for the temporary scan target.
+  FF_NETWORK_PER_BUILD: "true"
+
+stages:
+  - build
+  - test
+  - dast
+  - fuzz
+
+.application_job:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+build_application:
+  extends: .application_job
+  stage: build
+  image: python:3.11-slim
+  script:
+    - python -m compileall -q app.py
+    - python -m venv /tmp/lab-dependencies
+    - /tmp/lab-dependencies/bin/pip install -r requirements.txt
+    - /tmp/lab-dependencies/bin/pip install pipdeptree
+    - /tmp/lab-dependencies/bin/pipdeptree --exclude pipdeptree,pip,setuptools,wheel --json > pipdeptree.json
+    - mkdir -p dist
+    - tar -czf dist/security-lab.tar.gz app.py requirements.txt Dockerfile README.md
+  artifacts:
+    paths:
+      - dist/security-lab.tar.gz
+      - pipdeptree.json
+    expire_in: 1 week
+
+build_container:
+  extends: .application_job
+  stage: build
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: /certs/client
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+
+test_application:
+  extends: .application_job
+  stage: test
+  image: python:3.11-slim
+  before_script:
+    - pip install -r requirements.txt
+  script:
+    - python -m unittest discover -s tests -v
+
+# Preserve each template's rules, script, and typed report artifacts.
+# A scanner crash must not masquerade as successful security coverage.
+semgrep-sast:
+  allow_failure: false
+
+kics-iac-sast:
+  allow_failure: false
+
+secret_detection:
+  allow_failure: false
+
+container_scanning:
+  allow_failure: false
+
+# Every dynamic scanner receives a fresh, disposable service container.
+# No host ports or public deployment are created.
+.lab_target:
+  services:
+    - name: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+      alias: lab-target
+      variables:
+        HEALTHCHECK_TCP_PORT: "5000"
+
+dast:
+  extends: .lab_target
+  allow_failure: false
+  timeout: 45m
+  variables:
+    DAST_TARGET_URL: "http://lab-target:5000"
+    DAST_FULL_SCAN: "true"
+    DAST_TARGET_CHECK_TIMEOUT: "120"
+    DAST_CRAWL_TIMEOUT: "5m"
+    DAST_ACTIVE_SCAN_TIMEOUT: "30m"
+
+api_security:
+  extends: .lab_target
+  allow_failure: false
+  timeout: 45m
+  variables:
+    APISEC_TARGET_URL: "http://lab-target:5000"
+    APISEC_OPENAPI: "openapi.yaml"
+    APISEC_PROFILE: "Quick"
+
+apifuzzer_fuzz:
+  extends: .lab_target
+  allow_failure: false
+  timeout: 45m
+  variables:
+    FUZZAPI_TARGET_URL: "http://lab-target:5000"
+    FUZZAPI_OPENAPI: "openapi.yaml"
+    FUZZAPI_PROFILE: "Quick-10"
